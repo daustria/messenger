@@ -44,8 +44,12 @@ const vm = new Vue ({
       this.socket.on('disconnect', () => this.addNotification('Lost Connection'))
 
       // Dispaly message when recieved
-      this.socket.on('MESSAGE', (message) => 
-        {this.addMessage(message)
+      this.socket.on('MESSAGE', async (message) => {
+        // Only decrypt messages that were encrypted with the user's public key
+        if (message.recipient === this.originPublicKey) {
+          message.text = await this.getWebWorkerResponse('decrypt', message.text)
+          this.addMessage(message)
+        }
       })
 
       // When a user joins the current room, send them your public key
@@ -72,35 +76,73 @@ const vm = new Vue ({
         this.notify(`User Disconnected - ${this.getKeySnippet(this.destinationKey)}`)
         this.destinationPublicKey = null
       })
+
+      // Notify user that the room they are attempting to join is full
+      this.socket.on('ROOM_FULL', () => {
+        this.addNotification(`Cannot join ${this.pendingRoom}, room is full`)
+      
+      // Join a random room as a fallback
+      this.pendingRoom = Math.floor(Math.random() * 1000)
+      this.joinRoom()
+      })
+      
+      // Notify room that someone attempted to join
+      this.socket.on('INTRUSION_ATTEMPT', () => {
+        this.addNotification('A third user attempted to join the room.')
+      })
     },
 
     /** Send the current draft message */
-    sendMessage(){
-      // Do not send message if there is nothing to send
-      if (!this.draft || this.draft == '') {
-        return
+    async sendMessage(){
+      // Don't send message if there is nothing to send
+      if (!this.draft || this.draft === '') { return }
+
+      // Use immutable.js to avoid unintended side-effects.
+      let message = Immutable.Map({
+        text: this.draft,
+        recipient: this.destinationPublicKey,
+        sender: this.originPublicKey
+      })
+
+      // Reset the UI input draft text
+      this.draft = ''
+
+      // Instantly add (unencrypted) message to local UI
+      this.addMessage(message.toObject())
+
+      if (this.destinationPublicKey) {
+        const encryptedText = await this.getWebWorkerResponse(
+          'encrypt', [ message.get('text'), this.destinationPublicKey ])
+        const encryptedMsg = message.set('text', encryptedText)
+
+        this.socket.emit('MESSAGE', encryptedMsg.toObject())
       }
-
-      const message = this.draft
-
-      this.draft = '' // Reset UI input
-      this.addMessage(message)
-      this.socket.emit('MESSAGE', message)
     },
 
-    /*** Join the chatroom*/
-    joinRoom (){
-      this.socket.emit('JOIN')
+    /** Join the specified chatroom */
+    joinRoom () {
+      if (this.pendingRoom !== this.currentRoom && this.originPublicKey) {
+        this.addNotification(`Connecting to Room - ${this.pendingRoom}`)
+    
+        // Reset room state variables
+        this.messages = []
+        this.destinationPublicKey = null
+    
+        // Emit room join request.
+        this.socket.emit('JOIN', this.pendingRoom)
+      }
     },
 
     addMessage(message){
       this.messages.push(message)
+      this.autoscroll(this.$refs.chatContainer)
     },
 
     /** Append a notification message in the UI */
     addNotification (message) {
       const timestamp = new Date().toLocaleTimeString()
       this.notifications.push({ message, timestamp })
+      this.autoscroll(this.$refs.notificationContainer)
     },
 
     /** Post a message to the web worker and return a promise that will resolve with the response.  */
@@ -139,6 +181,11 @@ const vm = new Vue ({
     /** Get key snippet for display purposes */
     getKeySnippet (key) {
       return key.slice(400, 416)
-    }
+    },
+
+    /** Autoscoll DOM element to bottom */
+    autoscroll (element) {
+      if (element) { element.scrollTop = element.scrollHeight }
+    },
   }
 })
